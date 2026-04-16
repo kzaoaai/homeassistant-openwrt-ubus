@@ -94,7 +94,7 @@ class SharedUbusDataManager:
             "qmodem_info": timedelta(seconds=qmodem_timeout),
             "mwan3_status": timedelta(seconds=mwan3_timeout),
             "device_statistics": timedelta(seconds=sta_timeout),
-            "dhcp_leases": timedelta(seconds=sta_timeout),
+            "dhcp_leases": timedelta(minutes=5),  # Throttled to mitigate OpenWrt rpcd memory leak (file_read)
             "hostapd_clients": timedelta(seconds=sta_timeout),
             "iwinfo_stations": timedelta(seconds=sta_timeout),
             "ap_info": timedelta(seconds=ap_timeout),
@@ -105,7 +105,7 @@ class SharedUbusDataManager:
             "dhcp_clients_count": timedelta(seconds=sta_timeout),  # DHCP clients count
             "network_devices": timedelta(seconds=system_timeout),  # Network device status
             "wired_devices": timedelta(seconds=sta_timeout),  # Wired device tracking
-            "nlbwmon_top_hosts": timedelta(seconds=60),  # Per-host bandwidth usage via nlbwmon
+            "nlbwmon_top_hosts": timedelta(minutes=5),  # Throttled to mitigate OpenWrt rpcd memory leak (file_exec)
         }
         self._update_locks: Dict[str, asyncio.Lock] = {key: asyncio.Lock() for key in self._update_intervals}
 
