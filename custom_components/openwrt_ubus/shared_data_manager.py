@@ -99,7 +99,9 @@ class SharedUbusDataManager:
 
         self._update_intervals: Dict[str, timedelta] = {
             "system_info": timedelta(seconds=system_timeout),
-            "system_stat": max(timedelta(seconds=system_timeout), _file_throttle),  # file.read /proc/stat
+            # file.read /proc/stat — kept at system_timeout because CPU usage sensor
+            # needs frequent data to compute meaningful delta readings.
+            "system_stat": timedelta(seconds=system_timeout),
             "system_board": timedelta(seconds=system_timeout * 2),  # Board info changes less frequently
             "qmodem_info": timedelta(seconds=qmodem_timeout),
             "mwan3_status": timedelta(seconds=mwan3_timeout),
@@ -110,8 +112,11 @@ class SharedUbusDataManager:
             "ap_info": timedelta(seconds=ap_timeout),
             "service_status": timedelta(seconds=service_timeout),
             "hostapd_available": timedelta(minutes=30),  # Very long cache - hostapd availability rarely changes
-            "conntrack_count": max(timedelta(seconds=system_timeout), _file_throttle),  # file.read /proc/.../nf_conntrack_count
-            "system_temperatures": max(timedelta(seconds=system_timeout), _file_throttle),  # file.read /sys/class/hwmon/* (multiple calls)
+            # file.read /proc/.../nf_conntrack_count — not time-critical, heavily throttled
+            "conntrack_count": _file_throttle,
+            # file.list /sys/class/hwmon + file.read ×2 per sensor — temperature changes slowly,
+            # and this fires N+1 file.* calls per poll so we throttle more aggressively.
+            "system_temperatures": timedelta(minutes=2),
             "dhcp_clients_count": _file_throttle,  # Derived from mac2name cache, no extra file_read
             "network_devices": timedelta(seconds=system_timeout),  # Native system.* call, OK at system_timeout
             "wired_devices": _file_throttle,  # file.exec ip neigh ×2
