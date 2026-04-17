@@ -60,6 +60,9 @@ class SharedUbusDataManager:
         self._data_cache: Dict[str, Dict[str, Any]] = {}
         self._last_update: Dict[str, datetime] = {}
         self._interface_to_ssid = {}  # Cache for interface->SSID mapping
+        self._mac2name_cache: Dict[str, Dict[str, str]] = {}  # Cache for MAC->name mapping
+        self._mac2name_last_update: datetime | None = None  # Timestamp of last mac2name fetch
+        self._mac2name_ttl = timedelta(minutes=5)  # How long to cache mac2name (matches dhcp_leases throttle)
 
         # Get timeout values from configuration (priority: options > data > default)
         system_timeout = entry.options.get(
@@ -490,7 +493,22 @@ class SharedUbusDataManager:
             raise UpdateFailed(f"Error fetching iwinfo data: {exc}")
 
     async def _get_mac2name_mapping(self, dhcp_software: str) -> Dict[str, Dict[str, str]]:
-        """Generate MAC to name/IP mapping based on DHCP server."""
+        """Generate MAC to name/IP mapping based on DHCP server.
+
+        Results are cached for _mac2name_ttl (5 min) to avoid hammering rpcd's
+        file_read/file_exec on every 30-second poll cycle, which was causing a
+        steady memory leak on the main router (rpcd does not fully free the
+        file-read buffer on every call).
+        """
+        now = datetime.now()
+        if (
+            self._mac2name_last_update is not None
+            and now - self._mac2name_last_update < self._mac2name_ttl
+            and self._mac2name_cache
+        ):
+            _LOGGER.debug("mac2name: returning cached mapping (%d entries)", len(self._mac2name_cache))
+            return self._mac2name_cache
+
         mac2name = {}
         client = await self._get_ubus_client()
 
@@ -548,6 +566,10 @@ class SharedUbusDataManager:
             else:
                 _LOGGER.debug("Failed to get DHCP MAC to name mapping: %s", exc)
 
+        # Update cache
+        self._mac2name_cache = mac2name
+        self._mac2name_last_update = datetime.now()
+        _LOGGER.debug("mac2name: fetched fresh mapping (%d entries)", len(mac2name))
         return mac2name
 
     async def _fetch_conntrack_count(self) -> Dict[str, Any]:
@@ -1125,6 +1147,9 @@ class SharedUbusDataManager:
         else:
             self._data_cache.clear()
             self._last_update.clear()
+            # Also clear the mac2name cache so the next poll fetches fresh DHCP data
+            self._mac2name_cache = {}
+            self._mac2name_last_update = None
 
     async def force_reconnect_all_clients(self):
         """Force reconnection of all ubus clients (for testing/debugging)."""
