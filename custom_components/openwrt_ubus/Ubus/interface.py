@@ -27,7 +27,6 @@ from .const import (
     API_UBUS_RPC_SESSION_EXPIRES,
     _get_error_message,
     API_SESSION_METHOD_DESTROY,
-    API_SESSION_METHOD_LIST,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -130,15 +129,12 @@ class Ubus:
     async def _batch_call(self, rpcs: list[PreparedCall]) -> list[tuple[str, dict | list | None | Exception]] | None:
         self._ensure_session()
 
-        if rpcs[0] and rpcs[0].subsystem != API_SUBSYS_SESSION:
-            rpcs.append(
-                PreparedCall(  # Session list call for getting the session expiration
-                    rpc_method=API_RPC_CALL,
-                    subsystem=API_SUBSYS_SESSION,
-                    method=API_SESSION_METHOD_LIST,
-                    rpc_id="refresh_expiration",
-                )
-            )
+        # NOTE: We intentionally do NOT append a session.list piggyback call here.
+        # The session expiry is already known from the login response and is tracked
+        # via self.session_expire. Reconnection is handled proactively in
+        # _ensure_session_is_valid() before expiry. Appending session.list to every
+        # batch call doubled the total rpcd RPC load, contributing to the known
+        # rpcd memory leak (OpenWrt issue #20747).
 
         rpc_calls = []
         for rpc in rpcs:
@@ -274,18 +270,6 @@ class Ubus:
                             _append_result(ConnectionError(f"Unexpected API call result format: {result}"))
                     else:
                         _append_result(result)
-            if results[-1][0] == "refresh_expiration":
-                session_response = results.pop()[1]
-                if isinstance(session_response, Exception):
-                    try:
-                        raise session_response
-                    except (RPCError, PermissionError) as e:
-                        _LOGGER.warning("Failed to retrieve session expiration: %s [session_id: %s]", e, self.session_id)
-                elif isinstance(session_response, list):
-                    raise ConnectionError(f"Unexpected session API response format: {session_response}")
-                elif isinstance(session_response, dict):
-                    self.session_expire = time.time() + session_response.get("expires", 0)
-
             return results
         else:
             raise ConnectionError(f"Unexpected API response format: {responses}")

@@ -90,25 +90,32 @@ class SharedUbusDataManager:
             entry.data.get(CONF_MWAN3_SENSOR_TIMEOUT, DEFAULT_MWAN3_SENSOR_TIMEOUT),
         )
 
+        # Minimum interval for file.* calls to mitigate the rpcd memory leak
+        # (OpenWrt issue #20747). Any file.read/file.exec call to rpcd leaks memory;
+        # throttling reduces total allocations. 5 minutes is the floor for all
+        # file-subsystem callers. Non-file system/uci calls are kept at their
+        # configured timeouts since they use native ubus methods that are less leaky.
+        _file_throttle = timedelta(minutes=5)
+
         self._update_intervals: Dict[str, timedelta] = {
             "system_info": timedelta(seconds=system_timeout),
-            "system_stat": timedelta(seconds=system_timeout),  # file_read /proc/stat — throttled to system_timeout (was timedelta.min = every tick)
+            "system_stat": max(timedelta(seconds=system_timeout), _file_throttle),  # file.read /proc/stat
             "system_board": timedelta(seconds=system_timeout * 2),  # Board info changes less frequently
             "qmodem_info": timedelta(seconds=qmodem_timeout),
             "mwan3_status": timedelta(seconds=mwan3_timeout),
             "device_statistics": timedelta(seconds=sta_timeout),
-            "dhcp_leases": timedelta(minutes=5),  # Throttled to mitigate OpenWrt rpcd memory leak (file_read)
+            "dhcp_leases": _file_throttle,  # file.read /tmp/dhcp.leases
             "hostapd_clients": timedelta(seconds=sta_timeout),
             "iwinfo_stations": timedelta(seconds=sta_timeout),
             "ap_info": timedelta(seconds=ap_timeout),
-            "service_status": timedelta(seconds=service_timeout),  # Use configured service timeout
+            "service_status": timedelta(seconds=service_timeout),
             "hostapd_available": timedelta(minutes=30),  # Very long cache - hostapd availability rarely changes
-            "conntrack_count": timedelta(seconds=system_timeout),  # Connection tracking count
-            "system_temperatures": timedelta(seconds=system_timeout),  # System temperature sensors
-            "dhcp_clients_count": timedelta(minutes=5),  # Throttled — derived from mac2name cache, no extra file_read
-            "network_devices": timedelta(seconds=system_timeout),  # Network device status
-            "wired_devices": timedelta(minutes=5),  # Throttled — 2x file_exec (ip neigh) per call, no need for 30s refresh
-            "nlbwmon_top_hosts": timedelta(minutes=5),  # Throttled to mitigate OpenWrt rpcd memory leak (file_exec)
+            "conntrack_count": max(timedelta(seconds=system_timeout), _file_throttle),  # file.read /proc/.../nf_conntrack_count
+            "system_temperatures": max(timedelta(seconds=system_timeout), _file_throttle),  # file.read /sys/class/hwmon/* (multiple calls)
+            "dhcp_clients_count": _file_throttle,  # Derived from mac2name cache, no extra file_read
+            "network_devices": timedelta(seconds=system_timeout),  # Native system.* call, OK at system_timeout
+            "wired_devices": _file_throttle,  # file.exec ip neigh ×2
+            "nlbwmon_top_hosts": _file_throttle,  # file.exec nlbwmon
         }
         self._update_locks: Dict[str, asyncio.Lock] = {key: asyncio.Lock() for key in self._update_intervals}
 
