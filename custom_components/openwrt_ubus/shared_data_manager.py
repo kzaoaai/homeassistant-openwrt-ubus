@@ -92,7 +92,7 @@ class SharedUbusDataManager:
 
         self._update_intervals: Dict[str, timedelta] = {
             "system_info": timedelta(seconds=system_timeout),
-            "system_stat": timedelta.min,  # /proc/stat changes very frequently
+            "system_stat": timedelta(seconds=system_timeout),  # file_read /proc/stat — throttled to system_timeout (was timedelta.min = every tick)
             "system_board": timedelta(seconds=system_timeout * 2),  # Board info changes less frequently
             "qmodem_info": timedelta(seconds=qmodem_timeout),
             "mwan3_status": timedelta(seconds=mwan3_timeout),
@@ -105,9 +105,9 @@ class SharedUbusDataManager:
             "hostapd_available": timedelta(minutes=30),  # Very long cache - hostapd availability rarely changes
             "conntrack_count": timedelta(seconds=system_timeout),  # Connection tracking count
             "system_temperatures": timedelta(seconds=system_timeout),  # System temperature sensors
-            "dhcp_clients_count": timedelta(seconds=sta_timeout),  # DHCP clients count
+            "dhcp_clients_count": timedelta(minutes=5),  # Throttled — derived from mac2name cache, no extra file_read
             "network_devices": timedelta(seconds=system_timeout),  # Network device status
-            "wired_devices": timedelta(seconds=sta_timeout),  # Wired device tracking
+            "wired_devices": timedelta(minutes=5),  # Throttled — 2x file_exec (ip neigh) per call, no need for 30s refresh
             "nlbwmon_top_hosts": timedelta(minutes=5),  # Throttled to mitigate OpenWrt rpcd memory leak (file_exec)
         }
         self._update_locks: Dict[str, asyncio.Lock] = {key: asyncio.Lock() for key in self._update_intervals}
@@ -593,14 +593,32 @@ class SharedUbusDataManager:
             raise UpdateFailed(f"Error fetching system temperatures: {exc}")
 
     async def _fetch_dhcp_clients_count(self) -> Dict[str, Any]:
-        """Fetch DHCP clients count."""
+        """Fetch DHCP clients count.
+
+        Derives the count from the mac2name cache (refreshed every 5 min) rather
+        than making a separate file_read("/tmp/dhcp.leases") call.  On routers
+        without a DHCP server the cache will be empty and the count will be 0,
+        matching the previous behaviour.
+        """
+        # If the cache is populated, derive count from it without any rpcd call
+        if self._mac2name_last_update is not None and self._mac2name_cache:
+            count = len(self._mac2name_cache)
+            _LOGGER.debug("dhcp_clients_count: %d (from mac2name cache, no file_read)", count)
+            return {"dhcp_clients_count": count}
+
+        # Cache is cold (first call or after a reload) — populate it first via the
+        # regular mac2name fetch which will set _mac2name_cache as a side-effect.
+        # We need dhcp_software to know which parser to use; default to dnsmasq.
         client = await self._get_ubus_client()
         try:
-            clients_count = await client.get_dhcp_clients_count()
-            return {"dhcp_clients_count": clients_count}
-        except Exception as exc:
-            _LOGGER.error("Error fetching DHCP clients count: %s", exc)
-            raise UpdateFailed(f"Error fetching DHCP clients count: {exc}")
+            dhcp_software = await client.get_uci_config("dhcp", "dnsmasq")
+            sw = "dnsmasq" if dhcp_software else "odhcpd"
+        except Exception:
+            sw = "dnsmasq"
+        await self._get_mac2name_mapping(sw)
+        count = len(self._mac2name_cache)
+        _LOGGER.debug("dhcp_clients_count: %d (after cold-start mac2name fetch)", count)
+        return {"dhcp_clients_count": count}
 
     async def _fetch_network_devices(self) -> Dict[str, Any]:
         """Fetch network device status."""
