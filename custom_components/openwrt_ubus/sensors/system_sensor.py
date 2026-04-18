@@ -23,7 +23,7 @@ from homeassistant.const import (
     UnitOfTime,
     UnitOfTemperature,
 )
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -309,7 +309,7 @@ class SystemInfoSensor(CoordinatorEntity, SensorEntity):
         self.cpu_idle: int | None = None
         self.cpu_total: int | None = None
         self._cpu_usage_value: float | None = None  # Cached result computed on coordinator update
-        self._last_system_stat: str | None = None  # Last raw /proc/stat seen; skip delta when unchanged
+        self._last_system_stat: str | None = None  # Last raw /proc/stat seen; skip delta when unchanged (safety net)
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -339,6 +339,32 @@ class SystemInfoSensor(CoordinatorEntity, SensorEntity):
             sw_version=board_system,  # Use system info as software version
         )
 
+    async def async_added_to_hass(self) -> None:
+        """Pre-populate the CPU baseline from initial coordinator data.
+
+        CoordinatorEntity.async_added_to_hass only calls async_write_ha_state(),
+        not _handle_coordinator_update(), so our override never runs with the
+        initial data. Without this, the sequence is:
+
+          T=0  (entity add)  : cpu_idle = None  (no baseline)
+          T=N  (1st update)  : _compute_cpu_usage() → stores baseline, _cpu_usage_value = None
+          T=2N (2nd update)  : _compute_cpu_usage() → delta computed, first real value
+
+        Resulting in the first CPU % appearing at 2× scan_interval. By pre-populating
+        the baseline here, the timeline becomes:
+
+          T=0  (entity add)  : _compute_cpu_usage() → stores baseline
+          T=N  (1st update)  : _compute_cpu_usage() → delta computed, first real value
+        """
+        await super().async_added_to_hass()
+        if (
+            self.entity_description.key == "cpu_usage"
+            and self.coordinator.data
+            and self.cpu_idle is None  # Guard: skip if baseline was already stored
+        ):
+            self._compute_cpu_usage()
+
+    @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from coordinator.
 
