@@ -309,6 +309,7 @@ class SystemInfoSensor(CoordinatorEntity, SensorEntity):
         self.cpu_idle: int | None = None
         self.cpu_total: int | None = None
         self._cpu_usage_value: float | None = None  # Cached result computed on coordinator update
+        self._last_system_stat: str | None = None  # Last raw /proc/stat seen; skip delta when unchanged
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -351,14 +352,31 @@ class SystemInfoSensor(CoordinatorEntity, SensorEntity):
         super()._handle_coordinator_update()
 
     def _compute_cpu_usage(self) -> None:
-        """Compute CPU usage from /proc/stat delta. Called once per coordinator update."""
+        """Compute CPU usage from /proc/stat delta. Called once per coordinator update.
+
+        The coordinator and the _should_update throttle both use the same interval,
+        so epsilon timing can cause every other coordinator cycle to return *cached*
+        (identical) /proc/stat data. Computing a delta on identical data gives
+        cpu_total_delta == 0 → None, producing the alternating Unknown/value pattern.
+
+        We guard against this by storing the last raw string and skipping
+        recomputation when the data hasn't actually changed, preserving the last
+        good _cpu_usage_value until a genuinely new reading arrives.
+        """
         if not self.coordinator.data:
             return
-        system_stat = self.coordinator.data.get("system_stat", {}).get("data", "")
-        cpu_data = next(
-            (line for line in system_stat.splitlines() if line.startswith("cpu ")),
+        system_stat_raw = self.coordinator.data.get("system_stat", {}).get("data", "")
+
+        # Skip if /proc/stat content is unchanged (throttle cache hit) — keep last good value
+        if system_stat_raw == self._last_system_stat:
+            return
+        self._last_system_stat = system_stat_raw
+
+        cpu_line = next(
+            (line for line in system_stat_raw.splitlines() if line.startswith("cpu ")),
             "",
-        ).split()[1:]
+        )
+        cpu_data = cpu_line.split()[1:]
         if len(cpu_data) < 10:
             return  # Leave _cpu_usage_value unchanged (don't reset on transient error)
         cpu_data_int = [int(v) for v in cpu_data]
