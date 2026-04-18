@@ -89,7 +89,10 @@ class SharedUbusDataManager:
 
         self._update_intervals: Dict[str, timedelta] = {
             "system_info": timedelta(seconds=system_timeout),
-            "system_stat": timedelta.min,  # /proc/stat changes very frequently
+            # file.read /proc/stat — must refresh on every coordinator cycle for accurate
+            # CPU usage delta calculations. The 2-second tolerance in _should_update ensures
+            # this always fires even when scan_interval == system_timeout.
+            "system_stat": timedelta(seconds=system_timeout),
             "system_board": timedelta(seconds=system_timeout * 2),  # Board info changes less frequently
             "qmodem_info": timedelta(seconds=qmodem_timeout),
             "mwan3_status": timedelta(seconds=mwan3_timeout),
@@ -175,12 +178,25 @@ class SharedUbusDataManager:
         return await self._get_ubus_client("default")
 
     async def _should_update(self, data_type: str) -> bool:
-        """Check if data should be updated based on interval."""
+        """Check if data should be updated based on interval.
+
+        Uses a 2-second tolerance to account for coordinator scheduling jitter.
+        Without this, when a data type's throttle interval equals the coordinator's
+        scan_interval (the common case), epsilon timing causes the check to return
+        False on every other coordinator tick:
+
+          elapsed = interval - epsilon  →  elapsed > interval  →  False
+
+        Result: data only refreshes every 2× the intended interval.
+        The tolerance ensures the check passes when the coordinator fires at
+        approximately the right time, regardless of sub-second scheduling drift.
+        """
         if data_type not in self._last_update:
             return True
 
         interval = self._update_intervals.get(data_type, timedelta(minutes=1))
-        return datetime.now() - self._last_update[data_type] > interval
+        _SCHEDULING_TOLERANCE = timedelta(seconds=2)
+        return datetime.now() - self._last_update[data_type] >= interval - _SCHEDULING_TOLERANCE
 
     async def _fetch_system_info(self) -> Dict[str, Any]:
         """Fetch system information."""
