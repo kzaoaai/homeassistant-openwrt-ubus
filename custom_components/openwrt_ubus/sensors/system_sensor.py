@@ -306,8 +306,9 @@ class SystemInfoSensor(CoordinatorEntity, SensorEntity):
         self._host = coordinator.data_manager.entry.data[CONF_HOST]
         self._attr_unique_id = f"{self._host}_{description.key}"
         self._attr_has_entity_name = True
-        self.cpu_idle = None
-        self.cpu_total = None
+        self.cpu_idle: int | None = None
+        self.cpu_total: int | None = None
+        self._cpu_usage_value: float | None = None  # Cached result computed on coordinator update
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -337,6 +338,44 @@ class SystemInfoSensor(CoordinatorEntity, SensorEntity):
             sw_version=board_system,  # Use system info as software version
         )
 
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from coordinator.
+
+        Overridden to ensure the CPU usage delta is computed exactly once per
+        new data delivery — native_value is a property that HA can call multiple
+        times per cycle, so computing the delta there caused alternating
+        None → value → None cycles (delta was T-T = 0 on the second call).
+        """
+        if self.entity_description.key == "cpu_usage":
+            self._compute_cpu_usage()
+        super()._handle_coordinator_update()
+
+    def _compute_cpu_usage(self) -> None:
+        """Compute CPU usage from /proc/stat delta. Called once per coordinator update."""
+        if not self.coordinator.data:
+            return
+        system_stat = self.coordinator.data.get("system_stat", {}).get("data", "")
+        cpu_data = next(
+            (line for line in system_stat.splitlines() if line.startswith("cpu ")),
+            "",
+        ).split()[1:]
+        if len(cpu_data) < 10:
+            return  # Leave _cpu_usage_value unchanged (don't reset on transient error)
+        cpu_data_int = [int(v) for v in cpu_data]
+        cpu_idle = cpu_data_int[3] + cpu_data_int[4]
+        cpu_total = sum(cpu_data_int)
+        if self.cpu_idle is not None and self.cpu_total is not None:
+            cpu_total_delta = cpu_total - self.cpu_total
+            cpu_idle_delta = cpu_idle - self.cpu_idle
+            self._cpu_usage_value = (
+                round((1.0 - cpu_idle_delta / cpu_total_delta) * 100)
+                if cpu_total_delta > 0
+                else None
+            )
+        # else: first reading — no previous sample yet, leave _cpu_usage_value as None
+        self.cpu_idle = cpu_idle
+        self.cpu_total = cpu_total
+
     @property
     def native_value(self) -> Any:
         """Return the value reported by the sensor."""
@@ -362,25 +401,8 @@ class SystemInfoSensor(CoordinatorEntity, SensorEntity):
                 load_map = {"load_1": 0, "load_5": 1, "load_15": 2}
                 return load[load_map[key]] / 1000 if key in load_map else None
         elif key == "cpu_usage":
-            system_stat = self.coordinator.data.get("system_stat", {}).get("data", "")
-            cpu_data = next(
-                (line for line in system_stat.splitlines() if line.startswith("cpu ")),
-                "",
-            ).split()[1:]
-            cpu_data = [int(value) for value in cpu_data]
-            if len(cpu_data) < 10:
-                return None
-            cpu_idle = cpu_data[3] + cpu_data[4]
-            cpu_total = sum(cpu_data)
-            if self.cpu_idle is None or self.cpu_total is None:
-                cpu_usage = None
-            else:
-                cpu_idle_delta = cpu_idle - self.cpu_idle
-                cpu_total_delta = cpu_total - self.cpu_total
-                cpu_usage = round((1.0 - cpu_idle_delta / cpu_total_delta) * 100) if cpu_total_delta > 0 else None
-            self.cpu_total = cpu_total
-            self.cpu_idle = cpu_idle
-            return cpu_usage
+            # Delta already computed in _handle_coordinator_update; just return cache.
+            return self._cpu_usage_value
         elif key.startswith("memory_"):
             memory = system_info.get("memory", {})
             if key == "memory_total":
