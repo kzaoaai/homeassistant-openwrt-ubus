@@ -138,8 +138,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if result:
                         _LOGGER.debug("%s availability check: True", check_name)
                         return True
-                    _LOGGER.debug("%s availability check returned False/None/Empty", check_name)
-                    return False
+                    _LOGGER.debug("%s availability check returned empty (attempt %d/3)", check_name, attempt)
+                    if attempt < 3:
+                        await asyncio.sleep(2)
                 except Exception as exc:
                     err_str = str(exc)
                     # Don't retry permission errors
