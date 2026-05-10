@@ -27,7 +27,6 @@ from .const import (
     API_UBUS_RPC_SESSION_EXPIRES,
     _get_error_message,
     API_SESSION_METHOD_DESTROY,
-    API_SESSION_METHOD_LIST,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -80,6 +79,7 @@ class Ubus:
         self.debug_api = API_DEF_DEBUG
         self.session_id: str | None = None
         self.session_expire = 0
+        self._session_timeout = 300
         self._session_created_internally = False
         self._connect_lock = asyncio.Lock()
 
@@ -129,16 +129,6 @@ class Ubus:
 
     async def _batch_call(self, rpcs: list[PreparedCall]) -> list[tuple[str, dict | list | None | Exception]] | None:
         self._ensure_session()
-
-        if rpcs[0] and rpcs[0].subsystem != API_SUBSYS_SESSION:
-            rpcs.append(
-                PreparedCall(  # Session list call for getting the session expiration
-                    rpc_method=API_RPC_CALL,
-                    subsystem=API_SUBSYS_SESSION,
-                    method=API_SESSION_METHOD_LIST,
-                    rpc_id="refresh_expiration",
-                )
-            )
 
         rpc_calls = []
         for rpc in rpcs:
@@ -274,17 +264,10 @@ class Ubus:
                             _append_result(ConnectionError(f"Unexpected API call result format: {result}"))
                     else:
                         _append_result(result)
-            if results[-1][0] == "refresh_expiration":
-                session_response = results.pop()[1]
-                if isinstance(session_response, Exception):
-                    try:
-                        raise session_response
-                    except (RPCError, PermissionError) as e:
-                        _LOGGER.warning("Failed to retrieve session expiration: %s [session_id: %s]", e, self.session_id)
-                elif isinstance(session_response, list):
-                    raise ConnectionError(f"Unexpected session API response format: {session_response}")
-                elif isinstance(session_response, dict):
-                    self.session_expire = time.time() + session_response.get("expires", 0)
+            # Any successful batch call resets rpcd's inactivity timer, so
+            # refresh our local expiry tracking by the same amount as login.
+            if self.session_id:
+                self.session_expire = time.time() + self._session_timeout
 
             return results
         else:
@@ -363,7 +346,8 @@ class Ubus:
         )
         if login and API_UBUS_RPC_SESSION in login:
             self.session_id = login[API_UBUS_RPC_SESSION]
-            self.session_expire = time.time() + int(login[API_UBUS_RPC_SESSION_EXPIRES])
+            self._session_timeout = int(login[API_UBUS_RPC_SESSION_EXPIRES])
+            self.session_expire = time.time() + self._session_timeout
         else:
             self.session_id = None
 
